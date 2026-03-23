@@ -129,6 +129,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 17p
 .btn-sm { padding: 7px 14px; font-size: 12px; }
 
 /* TOAST */
+@keyframes slideUp { from { transform:translateX(-50%) translateY(20px); opacity:0; } to { transform:translateX(-50%) translateY(0); opacity:1; } }
 .toast { position: fixed; top: 76px; right: 18px; background: var(--surface2); border: 1px solid var(--border); border-radius: 11px; padding: 11px 16px; font-size: 13px; z-index: 999; transform: translateX(140%); transition: transform .3s; max-width: 300px; }
 .toast.show { transform: translateX(0); }
 .toast.success { border-color: var(--green); }
@@ -604,51 +605,44 @@ window.addEventListener('DOMContentLoaded', () => {
   const fn  = localStorage.getItem(LS.DRIVE_FILE); if (fn)  document.getElementById('driveFileName').value  = fn;
   window._savedNames = []; // Names selected manually per session via dropdown
 
-  // Datos de prueba si no hay sesiones guardadas
-  if (!getSessions().length) seedDemoData();
-
   renderPlayers();
   populatePlayerSelects();
   updatePresentCount();
   calcDuration();
+
+  // Prompt Drive auth if not already connected
+  if (!accessToken) {
+    setTimeout(() => {
+      showDrivePrompt();
+    }, 1200);
+  }
 });
 
-function seedDemoData() {
-  const dias = ['Domingo','Lunes','Martes','Miercoles','Jueves','Viernes','Sabado'];
-  const diasEs = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
-  const nombres = ['Carlos','Marcos','Adrián','Pablo','Iván','Sergio','Diego','Álvaro'];
-  const contenidos = ['Conducción + 1vs1','Pase y control','Pressing + transiciones','Juego de posición','Definición + remate','Técnica individual'];
-  const sessions = [];
-  let offset = 18;
-  for (let s = 0; s < 6; s++) {
-    const d = new Date(); d.setDate(d.getDate() - offset);
-    while (d.getDay() === 0 || d.getDay() === 6) { d.setDate(d.getDate() + 1); }
-    offset -= 3;
-    const numP = 5 + Math.floor(Math.random() * 3);
-    const players = nombres.slice(0, numP).map((name, i) => {
-      const present = Math.random() > 0.15;
-      return { num:i+1, name, present,
-        phys: ['bien','bien','bien','regular','cargado'][Math.floor(Math.random()*5)],
-        'Técnica': Math.floor(Math.random()*3)+3, 'Decisión': Math.floor(Math.random()*3)+2,
-        'Competitividad': Math.floor(Math.random()*3)+3, 'Actitud': Math.floor(Math.random()*2)+4,
-        playerScore: Math.floor(Math.random()*4)+6, coachScore: Math.floor(Math.random()*4)+5
-      };
-    });
-    sessions.push({ date:d.toISOString().split('T')[0], coach:'Samy', group:'Grupo ' + diasEs[d.getDay()],
-      location:'Ciudad Deportiva', sessionNum:s+1, content:contenidos[s],
-      coachSelf:Math.floor(Math.random()*3)+6, groupDyn:Math.floor(Math.random()*3)+6,
-      obs: s===2?'Buena intensidad en pressing. Mejorar salida de balón desde atrás.':'',
-      goals: s===5?'Profundizar en el juego entre líneas':'',
-      duration:(40+Math.floor(Math.random()*20))+'m 0s', players, savedAt:d.toISOString()
-    });
-  }
-  localStorage.setItem(LS.SESSIONS, JSON.stringify(sessions));
-  const perfiles = nombres.map((name, i) => ({
-    name, position:['Portero','Defensa','Defensa','Centrocampista','Centrocampista','Centrocampista','Delantero','Delantero'][i],
-    year: 2009 + Math.floor(Math.random()*3)
-  }));
-  localStorage.setItem(LS.PLAYERS, JSON.stringify(perfiles));
+function showDrivePrompt() {
+  // Only show if Drive not connected
+  if (accessToken && driveConnected) return;
+  const banner = document.createElement('div');
+  banner.id = 'drivePromptBanner';
+  banner.style.cssText = 'position:fixed;bottom:70px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent);border-radius:14px;padding:14px 20px;z-index:150;display:flex;align-items:center;gap:14px;box-shadow:0 4px 24px rgba(0,0,0,.5);max-width:420px;width:90%;animation:slideUp .3s ease;';
+  banner.innerHTML = `
+    <span style="font-size:22px;">☁️</span>
+    <div style="flex:1;">
+      <div style="font-size:13px;font-weight:600;margin-bottom:2px;">Conectar Google Drive</div>
+      <div style="font-size:11px;color:var(--muted);">Las sesiones se guardarán automáticamente en Drive</div>
+    </div>
+    <button onclick="connectOAuth();document.getElementById('drivePromptBanner').remove();"
+      style="background:var(--accent);color:#000;border:none;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:'DM Sans',sans-serif;">
+      🔐 Autorizar
+    </button>
+    <button onclick="document.getElementById('drivePromptBanner').remove();"
+      style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:18px;padding:4px;line-height:1;">✕</button>
+  `;
+  document.body.appendChild(banner);
+  // Auto-dismiss after 10 seconds
+  setTimeout(() => { const b = document.getElementById('drivePromptBanner'); if(b) b.remove(); }, 10000);
 }
+
+
 
 // ══════ DURATION ══════
 function calcDuration() {
