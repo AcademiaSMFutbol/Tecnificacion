@@ -1385,6 +1385,7 @@ function connectOAuth() {
       updateDriveUI(true);
       closeModal('driveModal');
       showToast('🟢 Drive autorizado. Las sesiones se guardarán en SM FÚTBOL - TECNIFICACIÓN', 'success');
+      setTimeout(() => syncPhotosFromDrive(), 1000);
     },
   });
   client.requestAccessToken({ prompt: 'select_account' });
@@ -1415,7 +1416,7 @@ function checkOAuthCallback() {
   if (saved && (Date.now() - ts) < 55 * 60 * 1000) {
     accessToken = saved;
     driveConnected = true;
-    setTimeout(() => updateDriveUI(true), 400);
+    setTimeout(() => { updateDriveUI(true); syncPhotosFromDrive(); }, 600);
   }
 }
 
@@ -1752,7 +1753,10 @@ function cropConfirm() {
 
   closeModal('cropModal');
   renderJugadores();
-  showToast('✅ Foto guardada', 'success');
+  showToast('✅ Foto guardada localmente', 'success');
+
+  // Upload to Drive if authorized
+  if (accessToken) uploadPhotoToDrive(_currentPlayerName, dataUrl);
 }
 
 // Drag to pan
@@ -2324,6 +2328,149 @@ async function addPuntosAfterSession(sessionData) {
     });
     localStorage.setItem(LS.PLAYERS, JSON.stringify(players));
     showToast('⭐ Puntos Camino SM actualizados (+10 por jugador)', 'success');
+  }
+}
+
+// ══════ PHOTO SYNC VIA DRIVE ══════
+async function uploadPhotoToDrive(playerName, dataUrl) {
+  if (!accessToken) return;
+  try {
+    // Get or create photos folder inside SM FÚTBOL - TECNIFICACIÓN
+    const folderName = 'SM FÚTBOL - TECNIFICACIÓN';
+    const photosFolderName = 'fotos';
+
+    // Find parent folder
+    let parentId = null;
+    const f1 = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=name='${encodeURIComponent(folderName)}' and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id)`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const fd1 = await f1.json();
+    if (fd1.files && fd1.files.length) {
+      parentId = fd1.files[0].id;
+    } else {
+      const cf = await fetch('https://www.googleapis.com/drive/v3/files', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: folderName, mimeType: 'application/vnd.google-apps.folder' })
+      });
+      parentId = (await cf.json()).id;
+    }
+
+    // Find or create fotos subfolder
+    let photosFolderId = null;
+    const f2 = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=name='${photosFolderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id)`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const fd2 = await f2.json();
+    if (fd2.files && fd2.files.length) {
+      photosFolderId = fd2.files[0].id;
+    } else {
+      const cf2 = await fetch('https://www.googleapis.com/drive/v3/files', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: photosFolderName, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] })
+      });
+      photosFolderId = (await cf2.json()).id;
+    }
+
+    // Convert base64 to blob
+    const base64 = dataUrl.split(',')[1];
+    const byteChars = atob(base64);
+    const byteArr = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+    const blob = new Blob([byteArr], { type: 'image/jpeg' });
+
+    // Safe filename: normalize player name
+    const fileName = playerName.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9 ]/g,'').trim().replace(/ /g,'_') + '.jpg';
+
+    // Check if file already exists
+    const f3 = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=name='${fileName}' and '${photosFolderId}' in parents and trashed=false&fields=files(id)`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const fd3 = await f3.json();
+
+    if (fd3.files && fd3.files.length) {
+      // Update existing
+      await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fd3.files[0].id}?uploadType=media`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'image/jpeg' },
+        body: blob
+      });
+    } else {
+      // Create new
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify({ name: fileName, parents: [photosFolderId] })], { type: 'application/json' }));
+      form.append('file', blob);
+      await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method: 'POST', headers: { Authorization: `Bearer ${accessToken}` }, body: form
+      });
+    }
+    showToast('☁️ Foto sincronizada en Drive', 'success');
+  } catch(e) {
+    console.error('Error subiendo foto a Drive:', e);
+  }
+}
+
+async function syncPhotosFromDrive() {
+  if (!accessToken) return;
+  try {
+    // Find fotos folder
+    const f1 = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=name='fotos' and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id)`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const fd1 = await f1.json();
+    if (!fd1.files || !fd1.files.length) return;
+    const folderId = fd1.files[0].id;
+
+    // List all jpg files
+    const f2 = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType='image/jpeg' and trashed=false&fields=files(id,name)`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const fd2 = await f2.json();
+    if (!fd2.files || !fd2.files.length) return;
+
+    const photos = JSON.parse(localStorage.getItem(LS.PHOTOS) || '{}');
+    const players = getPlayers();
+    let updated = 0;
+
+    for (const file of fd2.files) {
+      // Convert filename back to player name
+      const baseName = file.name.replace('.jpg', '').replace(/_/g, ' ');
+      // Find matching player
+      const player = players.find(p => {
+        const safe = p.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9 ]/g,'').trim();
+        return safe.toLowerCase() === baseName.toLowerCase();
+      });
+      if (!player) continue;
+
+      // Only download if we don't have this photo locally
+      if (photos[player.name]) continue;
+
+      const imgResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const imgBlob = await imgResp.blob();
+      const reader = new FileReader();
+      await new Promise(resolve => {
+        reader.onload = e => { photos[player.name] = e.target.result; resolve(); };
+        reader.readAsDataURL(imgBlob);
+      });
+      updated++;
+    }
+
+    if (updated > 0) {
+      localStorage.setItem(LS.PHOTOS, JSON.stringify(photos));
+      renderJugadores();
+      showToast(`📸 ${updated} foto${updated!==1?'s':''} sincronizada${updated!==1?'s':''} desde Drive`, 'success');
+    }
+  } catch(e) {
+    console.error('Error descargando fotos:', e);
   }
 }
 
