@@ -671,6 +671,7 @@ function showPage(name) {
   document.getElementById('page-' + name).classList.add('active');
   const map = { registro:'sesión', historial:'historial', stats:'estad', jugadores:'jugad' };
   document.querySelectorAll('.nav-tab').forEach(t => { if (t.textContent.toLowerCase().includes(map[name])) t.classList.add('active'); });
+  if (name === 'registro') document.getElementById('sessionNum').value = getSessions().length + 1;
   if (name === 'historial') renderHistorial();
   if (name === 'stats') renderStats();
   if (name === 'jugadores') renderJugadores();
@@ -920,7 +921,9 @@ function delSession(e, idx) {
   e.stopPropagation();
   if (!confirm('¿Eliminar esta sesión del historial? Esta acción no se puede deshacer.')) return;
   const arr = getSessions(); arr.splice(idx, 1); localStorage.setItem(LS.SESSIONS, JSON.stringify(arr));
-  renderHistorial(); showToast('Sesión eliminada', '');
+  renderHistorial();
+  document.getElementById('sessionNum').value = getSessions().length + 1;
+  showToast('Sesión eliminada', '');
 }
 
 // ══════ ESTADÍSTICAS ══════
