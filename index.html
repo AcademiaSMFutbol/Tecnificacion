@@ -911,13 +911,79 @@ function showHist(idx) {
   document.getElementById('hdContent').textContent = buildSummary(s);
   document.getElementById('histDetailModal').classList.add('open');
 }
-function delSession(e, idx) {
+async function delSession(e, idx) {
   e.stopPropagation();
   if (!confirm('¿Eliminar esta sesión del historial? Esta acción no se puede deshacer.')) return;
-  const arr = getSessions(); arr.splice(idx, 1); localStorage.setItem(LS.SESSIONS, JSON.stringify(arr));
+  const arr = getSessions();
+  const deleted = arr[idx];
+  arr.splice(idx, 1);
+  localStorage.setItem(LS.SESSIONS, JSON.stringify(arr));
   renderHistorial();
   document.getElementById('sessionNum').value = getSessions().length + 1;
-  showToast('Sesión eliminada', '');
+  showToast('Sesión eliminada localmente', '');
+
+  // Remove from Drive CSV if connected
+  if (accessToken && deleted) {
+    await removeSessionFromDriveCSV(deleted);
+  }
+}
+
+async function removeSessionFromDriveCSV(deletedSession) {
+  const fileName = 'Tecnificacion_Sesiones.csv';
+  const folderName = 'SM FÚTBOL - TECNIFICACIÓN';
+  try {
+    // Find folder
+    const f1 = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=name='${encodeURIComponent(folderName)}' and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id)`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const fd1 = await f1.json();
+    if (!fd1.files || !fd1.files.length) return;
+    const folderId = fd1.files[0].id;
+
+    // Find CSV file
+    const f2 = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=name='${fileName}' and '${folderId}' in parents and trashed=false&fields=files(id)`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const fd2 = await f2.json();
+    if (!fd2.files || !fd2.files.length) return;
+    const fileId = fd2.files[0].id;
+
+    // Get current CSV content
+    const getResp = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const csvText = await getResp.text();
+    const lines = csvText.trim().split('
+');
+    const header = lines[0];
+
+    // Filter out rows matching deleted session (by date + sessionNum)
+    const filtered = lines.slice(1).filter(line => {
+      const cols = line.split(',');
+      const lineDate = (cols[0] || '').replace(/"/g, '').trim();
+      const lineSessNum = (cols[1] || '').replace(/"/g, '').trim();
+      return !(lineDate === deletedSession.date && lineSessNum === String(deletedSession.sessionNum));
+    });
+
+    const newCsv = [header, ...filtered].join('
+');
+
+    // Write back
+    await fetch(
+      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'text/csv' },
+        body: newCsv
+      }
+    );
+    showToast('🗑 Sesión eliminada del CSV en Drive', 'success');
+  } catch(e) {
+    console.error('Error eliminando sesión de Drive:', e);
+  }
 }
 
 // ══════ ESTADÍSTICAS ══════
@@ -2305,23 +2371,64 @@ async function fetchPuntosCamino(players) {
 
 async function addPuntosAfterSession(sessionData) {
   const stored = JSON.parse(localStorage.getItem(LS.PUNTOS) || '{}');
-  let updated = false;
+  const updatedPlayers = [];
+
   sessionData.players.forEach(p => {
     if (!p.present || !p.name) return;
     const key = p.name.toLowerCase().trim();
     const current = stored[key] !== undefined ? stored[key] : getPuntosForPlayer(p.name);
     stored[key] = current + 10;
-    updated = true;
+    updatedPlayers.push({ name: p.name, key, newPts: stored[key] });
   });
-  if (updated) {
-    localStorage.setItem(LS.PUNTOS, JSON.stringify(stored));
-    // Update players array
-    const players = getPlayers().map(p => {
-      const key = p.name.toLowerCase().trim();
-      return { ...p, puntosCamino: stored[key] !== undefined ? stored[key] : p.puntosCamino || 0 };
+
+  if (!updatedPlayers.length) return;
+
+  // Update localStorage
+  localStorage.setItem(LS.PUNTOS, JSON.stringify(stored));
+  const players = getPlayers().map(p => {
+    const key = p.name.toLowerCase().trim();
+    return { ...p, puntosCamino: stored[key] !== undefined ? stored[key] : p.puntosCamino || 0 };
+  });
+  localStorage.setItem(LS.PLAYERS, JSON.stringify(players));
+  showToast('⭐ Puntos Camino SM actualizados (+10 por jugador)', 'success');
+
+  // Write to Google Sheets if authorized
+  if (!accessToken) return;
+  try {
+    const sheetId = '1qT0y1JG9CQks3iB7HqM2s-DvYZA7azPjapNbSEh_zxo';
+    // Read current sheet to find row positions
+    const resp = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/sesiones!N5:P?key=AIzaSyAalNNVXFMGbNLZYdWgwGkNhTv4m2AozzY`
+    );
+    const data = await resp.json();
+    if (!data.values) return;
+
+    const updates = [];
+    updatedPlayers.forEach(({ name, newPts }) => {
+      const rowIdx = data.values.findIndex(r =>
+        (r[0]||'').trim().toLowerCase().includes(name.split(' ')[0].toLowerCase())
+      );
+      if (rowIdx !== -1) {
+        updates.push({
+          range: `sesiones!P${rowIdx + 5}`,
+          values: [[newPts]]
+        });
+      }
     });
-    localStorage.setItem(LS.PLAYERS, JSON.stringify(players));
-    showToast('⭐ Puntos Camino SM actualizados (+10 por jugador)', 'success');
+
+    if (updates.length) {
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values:batchUpdate`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: updates })
+        }
+      );
+      showToast(`⭐ Puntos actualizados en Google Sheets (${updates.length} jugadores)`, 'success');
+    }
+  } catch(e) {
+    console.error('Error actualizando puntos en Sheets:', e);
   }
 }
 
